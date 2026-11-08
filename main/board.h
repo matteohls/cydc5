@@ -14,6 +14,7 @@
 #define PIN_LCD_BL     25
 #define PIN_SD_CS      10
 #define PIN_TOUCH_CS   1   /* must be held HIGH, otherwise XPT2046 fights for MISO */
+#define PIN_TOUCH_IRQ  3   /* low while touched (from one source only - verify if touch never responds) */
 
 #define LCD_HOST_ID    SPI2_HOST
 #define LCD_W          320
@@ -23,8 +24,8 @@
 
 /* Size of the game picture on screen. 267x240 = full height, correct aspect ratio.
  * If it is too slow, use 240x216 (1.5x). Max is 320x240. */
-#define GAME_OUT_W     267
-#define GAME_OUT_H     240
+#define GAME_OUT_W     240   /* 1.5x, leaves 40 px left/right for touch buttons and 24 px at the bottom */
+#define GAME_OUT_H     216
 
 /*
  * Panel orientation / colour. These are NOT verified on real hardware.

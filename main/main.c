@@ -45,7 +45,7 @@ static const char *TAG = "gbemu";
 #define OUT_W GAME_OUT_W
 #define OUT_H GAME_OUT_H
 #define GB_X0 ((LCD_W - OUT_W) / 2)
-#define GB_Y0 ((LCD_H - OUT_H) / 2)
+#define GB_Y0 0
 #define SCALE_ROWS 24
 #define FRAME_US 16742   /* 59.73 Hz */
 
@@ -469,8 +469,151 @@ static void usb_init(void)
     ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&cfg));
 }
 
+/* ---------- touch (XPT2046, resistive, ONE touch point only) ---------- */
+typedef struct { int16_t swap, x0, x1, y0, y1; } cal_t;
+static cal_t cal;
+static spi_device_handle_t touch_dev;
+static bool touch_ok;
+#define CAL_FILE "/sdcard/touch.cal"
+#define CAL_MARGIN 15
+
+static int xpt_read(uint8_t cmd)
+{
+    spi_transaction_t t = { .length = 24, .flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA };
+    t.tx_data[0] = cmd; t.tx_data[1] = 0; t.tx_data[2] = 0;
+    spi_device_polling_transmit(touch_dev, &t);
+    return (((t.rx_data[1] << 8) | t.rx_data[2]) >> 3) & 0xFFF;
+}
+
+static int cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
+
+static bool touch_raw(int *rx, int *ry)
+{
+    if (!touch_dev || gpio_get_level(PIN_TOUCH_IRQ)) return false;   /* IRQ low = touched */
+    int xs[5], ys[5];
+    for (int i = 0; i < 5; i++) { xs[i] = xpt_read(0xD0); ys[i] = xpt_read(0x90); }
+    qsort(xs, 5, sizeof(int), cmp_int);
+    qsort(ys, 5, sizeof(int), cmp_int);
+    *rx = xs[2]; *ry = ys[2];
+    return *rx > 50 && *rx < 4050 && *ry > 50 && *ry < 4050;
+}
+
+static bool touch_screen(int *sx, int *sy)
+{
+    int rx, ry;
+    if (!touch_ok || !touch_raw(&rx, &ry)) return false;
+    int ax = cal.swap ? ry : rx, ay = cal.swap ? rx : ry;
+    int dx = cal.x1 - cal.x0, dy = cal.y1 - cal.y0;
+    if (dx == 0 || dy == 0) return false;
+    int x = CAL_MARGIN + (ax - cal.x0) * (LCD_W - 2 * CAL_MARGIN) / dx;
+    int y = CAL_MARGIN + (ay - cal.y0) * (LCD_H - 2 * CAL_MARGIN) / dy;
+    *sx = x < 0 ? 0 : (x >= LCD_W ? LCD_W - 1 : x);
+    *sy = y < 0 ? 0 : (y >= LCD_H ? LCD_H - 1 : y);
+    return true;
+}
+
+/* waits for a press (returns false after timeout), then for release */
+static bool cal_wait_tap(int *rx, int *ry)
+{
+    int waited = 0;
+    int a, b;
+    while (touch_raw(&a, &b)) vTaskDelay(pdMS_TO_TICKS(20));          /* wait for release first */
+    for (;;) {
+        if (touch_raw(&a, &b)) {
+            vTaskDelay(pdMS_TO_TICKS(120));                           /* let it settle */
+            if (touch_raw(rx, ry)) break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if (++waited > 1500) return false;                            /* 30 s */
+    }
+    while (touch_raw(&a, &b)) vTaskDelay(pdMS_TO_TICKS(20));
+    return true;
+}
+
+static bool touch_calibrate(void)
+{
+    const int px[3] = { CAL_MARGIN, LCD_W - CAL_MARGIN, LCD_W - CAL_MARGIN };
+    const int py[3] = { CAL_MARGIN, CAL_MARGIN, LCD_H - CAL_MARGIN };
+    int rx[3], ry[3];
+    for (int i = 0; i < 3; i++) {
+        fill_rect(0, 0, LCD_W, LCD_H, COL_BG);
+        draw_text(40, 100, "TOUCH SETUP", COL_SEL, COL_BG, 2);
+        draw_text(40, 130, "TAP THE CROSS", COL_FG, COL_BG, 2);
+        fill_rect(px[i] - 8, py[i] - 1, 17, 3, COL_FG);
+        fill_rect(px[i] - 1, py[i] - 8, 3, 17, COL_FG);
+        if (!cal_wait_tap(&rx[i], &ry[i])) return false;
+    }
+    cal.swap = abs(ry[1] - ry[0]) > abs(rx[1] - rx[0]);
+    if (!cal.swap) { cal.x0 = rx[0]; cal.x1 = rx[1]; cal.y0 = ry[0]; cal.y1 = ry[2]; }
+    else           { cal.x0 = ry[0]; cal.x1 = ry[1]; cal.y0 = rx[0]; cal.y1 = rx[2]; }
+    lcd_wait_idle();
+    FILE *f = fopen(CAL_FILE, "wb");
+    if (f) { fwrite(&cal, sizeof cal, 1, f); fclose(f); }
+    return true;
+}
+
+static void touch_init(void)
+{
+    gpio_config_t irq = { .pin_bit_mask = 1ULL << PIN_TOUCH_IRQ, .mode = GPIO_MODE_INPUT, .pull_up_en = GPIO_PULLUP_ENABLE };
+    gpio_config(&irq);
+    spi_device_interface_config_t dc = {
+        .clock_speed_hz = 1000000,
+        .mode = 0,
+        .spics_io_num = PIN_TOUCH_CS,
+        .queue_size = 1,
+    };
+    if (spi_bus_add_device(LCD_HOST_ID, &dc, &touch_dev) != ESP_OK) { ESP_LOGE(TAG, "touch device failed"); touch_dev = NULL; return; }
+
+    bool have = false;
+    if (sd_ok) {
+        lcd_wait_idle();
+        FILE *f = fopen(CAL_FILE, "rb");
+        if (f) { have = fread(&cal, sizeof cal, 1, f) == 1 && cal.x1 != cal.x0 && cal.y1 != cal.y0; fclose(f); }
+    }
+    touch_ok = true;
+    if (!have) {
+        touch_ok = touch_calibrate();
+        if (!touch_ok) ESP_LOGW(TAG, "touch calibration skipped (no taps)");
+    }
+}
+
+/* ---------- touch layout while playing ----------
+ *  x < 40            : d-pad (up / down / left / right)
+ *  x >= 280          : A (top half) / B (bottom half)
+ *  y >= 216 (bottom) : SELECT | START | MENU
+ */
+#define TOUCH_MENU_FLAG 0x100
+static uint16_t touch_zone(int sx, int sy)
+{
+    if (sy >= OUT_H) {
+        if (sx < LCD_W / 3) return 0x04;
+        if (sx < 2 * LCD_W / 3) return 0x08;
+        return TOUCH_MENU_FLAG;
+    }
+    if (sx < GB_X0) {
+        if (sy < 90) return 0x40;
+        if (sy > 126) return 0x80;
+        return sx < GB_X0 / 2 ? 0x20 : 0x10;
+    }
+    if (sx >= GB_X0 + OUT_W) return sy < OUT_H / 2 ? 0x01 : 0x02;
+    return 0;
+}
+
+static void draw_touch_hints(void)
+{
+    uint16_t pad = SW(C565(70, 80, 88)), ab = SW(C565(123, 42, 71));
+    fill_rect(11, 72, 18, 18, pad);  fill_rect(11, 126, 18, 18, pad);
+    fill_rect(0, 99, 18, 18, pad);   fill_rect(22, 99, 18, 18, pad);
+    fill_rect(284, 50, 32, 32, ab);  draw_text(294, 59, "A", COL_FG, ab, 2);
+    fill_rect(284, 130, 32, 32, ab); draw_text(294, 139, "B", COL_FG, ab, 2);
+    draw_text(30, 222, "SEL", COL_DIM, COL_BG, 2);
+    draw_text(130, 222, "START", COL_DIM, COL_BG, 2);
+    draw_text(250, 222, "MENU", COL_DIM, COL_BG, 2);
+}
+
 /* ---------- menu ---------- */
 static int sel, top;
+static bool touch_block;   /* ignore a touch that is still held from the previous screen */
 static char menu_msg[48] = "";
 #define MENU_ROWS 10
 
@@ -499,6 +642,7 @@ static void start_rom(int idx)
     const char *err = load_rom(idx);
     if (err) { menu_set_msg(err); menu_draw(); return; }
     fill_rect(0, 0, LCD_W, LCD_H, COL_BG);
+    draw_touch_hints();
     in_play = true;
     send_status("PLAYING");
 }
@@ -509,6 +653,18 @@ static void menu_tick(void)
     uint8_t edge = joy_host & ~prev;
     prev = joy_host;
     bool dirty = false;
+
+    /* touch: tap a row to start it, tap the title to page up, tap the bottom line to page down */
+    int tx, ty;
+    static bool tprev;
+    if (!touch_screen(&tx, &ty)) { tprev = false; touch_block = false; }
+    else if (!tprev && !touch_block) {
+        tprev = true;
+        if (ty < 30) { top = top > MENU_ROWS ? top - MENU_ROWS : 0; sel = top; dirty = true; }
+        else if (ty >= 210) { if (top + MENU_ROWS < n_roms) top += MENU_ROWS; sel = top; dirty = true; }
+        else { int i = top + (ty - 30) / 18; if (i < n_roms) { sel = i; start_rom(i); return; } }
+    }
+
     if (edge & 0x40) { if (sel > 0) sel--; dirty = true; }          /* up */
     if (edge & 0x80) { if (sel + 1 < n_roms) sel++; dirty = true; } /* down */
     if (sel < top) top = sel;
@@ -541,9 +697,17 @@ static void play_loop(void)
         if (pend_reset) { pend_reset = false; gb_reset(&gb); send_status("RESET"); }
         if (pend_ss) { pend_ss = false; send_status(state_save() ? "STATE SAVED" : "STATE SAVE FAILED"); }
         if (pend_ls) { pend_ls = false; send_status(state_load() ? "STATE LOADED" : "NO STATE"); }
-        if (pend_load >= 0) { int i = pend_load; pend_load = -1; const char *e = load_rom(i); if (e) { send_status(e); in_play = false; break; } fill_rect(0, 0, LCD_W, LCD_H, COL_BG); }
+        if (pend_load >= 0) { int i = pend_load; pend_load = -1; const char *e = load_rom(i); if (e) { send_status(e); in_play = false; break; } fill_rect(0, 0, LCD_W, LCD_H, COL_BG); draw_touch_hints(); }
 
-        gb.direct.joypad = (uint8_t)~joy_host;
+        /* touch buttons (single touch point) are combined with the laptop input */
+        static bool menu_was;
+        uint16_t tz = 0;
+        int tx, ty;
+        if (touch_screen(&tx, &ty)) tz = touch_zone(tx, ty);
+        bool menu_now = (tz & TOUCH_MENU_FLAG) != 0;
+        if (menu_now && !menu_was) pend_menu = true;
+        menu_was = menu_now;
+        gb.direct.joypad = (uint8_t)~(joy_host | (tz & 0xFF));
 
         int64_t now = esp_timer_get_time();
         skip_render = (now > next + FRAME_US);   /* running late: drop this frame's drawing */
@@ -611,10 +775,11 @@ void app_main(void)
     scan_roms();
     ESP_LOGI(TAG, "%d ROMs, PSRAM free %u", n_roms, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
+    touch_init();
     menu_draw();
     while (1) {
         poll_serial();
-        if (in_play) { play_loop(); menu_draw(); }
+        if (in_play) { play_loop(); touch_block = true; menu_draw(); }
         else menu_tick();
         if (pend_menu && !in_play) pend_menu = false;
     }
