@@ -1,0 +1,21 @@
+# Target is selected with: idf.py set-target esp32c5
+# Flash: 8 MB layout on purpose (a 16 MB layout reportedly failed to boot on NM-CYD-C5 in other projects)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# 8 MB PSRAM holds the whole ROM
+CONFIG_SPIRAM=y
+
+# Speed
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_FREERTOS_HZ=1000
+
+# Emulator task runs flat out on the single core; do not let the idle-task watchdog reset us
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+
+# Long file names for ROMs
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=127

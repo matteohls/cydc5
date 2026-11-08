@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GB Controller</title>
+<style>
+  :root { color-scheme: dark; --bg:#101410; --fg:#dfe8d0; --acc:#9bbc0f; --btn:#2a3326; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px system-ui, sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:16px; display:grid; gap:16px; grid-template-columns:1fr; }
+  @media (min-width:800px){ main { grid-template-columns: 340px 1fr; } }
+  canvas { width:100%; image-rendering:pixelated; background:#0f380f; border:2px solid #2a3326; border-radius:6px; }
+  button { background:var(--btn); color:var(--fg); border:1px solid #3d4a37; border-radius:8px; padding:10px 14px; font:inherit; cursor:pointer; touch-action:none; user-select:none; }
+  button.on, button:active { background:var(--acc); color:#0f380f; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .pad { display:grid; grid-template-columns:repeat(3,56px); grid-template-rows:repeat(3,56px); gap:4px; }
+  .pad button { padding:0; }
+  .ab { display:flex; gap:12px; align-items:center; }
+  .ab button { width:64px; height:64px; border-radius:50%; font-weight:700; }
+  #roms { max-height:260px; overflow:auto; border:1px solid #2a3326; border-radius:6px; }
+  #roms div { padding:8px 10px; cursor:pointer; border-bottom:1px solid #1d241a; }
+  #roms div:hover { background:#1d241a; }
+  #status { color:var(--acc); min-height:1.4em; }
+  small { opacity:.7 }
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <canvas id="screen" width="160" height="144"></canvas>
+    <p id="status">Not connected</p>
+    <div class="row">
+      <button id="connect">Connect</button>
+      <label><input type="checkbox" id="video" checked> Show video</label>
+    </div>
+    <p><small>Chrome or Edge only (Web Serial). Pick the ESP32-C5 USB port (native USB, "USB JTAG/serial").
+    Keys: arrows, Z = A, X = B, Enter = Start, Backspace = Select, Esc = Menu.</small></p>
+  </section>
+  <section>
+    <div class="row" style="justify-content:space-between">
+      <div class="pad">
+        <span></span><button data-k="64">▲</button><span></span>
+        <button data-k="32">◀</button><span></span><button data-k="16">▶</button>
+        <span></span><button data-k="128">▼</button><span></span>
+      </div>
+      <div class="ab"><button data-k="2">B</button><button data-k="1">A</button></div>
+    </div>
+    <div class="row" style="margin:12px 0">
+      <button data-k="4">Select</button><button data-k="8">Start</button>
+      <button id="menu">Menu</button><button id="reset">Reset</button>
+      <button id="ss">Save state</button><button id="ls">Load state</button>
+    </div>
+    <div class="row" style="margin-bottom:6px"><b>ROMs</b><button id="refresh">Refresh</button></div>
+    <div id="roms"><div style="cursor:default;opacity:.6">Connect to list ROMs</div></div>
+  </section>
+</main>
+<script>
+const SYNC0 = 0xA5, SYNC1 = 0x5A;
+const C = { JOY:1, MENU:2, RESET:3, SAVESTATE:4, LOADSTATE:5, LIST:6, LOAD:7, VIDEO:8, HELLO:9 };
+const PAL = [[155,188,15],[139,172,15],[48,98,48],[15,56,15]];
+const FRAME_BYTES = 160 * 144 / 4;
+
+const $ = id => document.getElementById(id);
+const ctx = $('screen').getContext('2d');
+const img = ctx.createImageData(160, 144);
+let port, writer, reader, joy = 0, connected = false;
+
+function setStatus(t){ $('status').textContent = t; }
+
+async function send(cmd, arg = 0){
+  if (!writer) return;
+  try { await writer.write(new Uint8Array([SYNC0, cmd, arg & 255])); } catch(e){ setStatus('Write failed: ' + e.message); }
+}
+const setJoy = (bit, down) => { const n = down ? (joy | bit) : (joy & ~bit); if (n !== joy){ joy = n; send(C.JOY, joy); } };
+
+function drawFrame(p){
+  for (let i = 0; i < FRAME_BYTES; i++){
+    const b = p[i];
+    for (let k = 0; k < 4; k++){
+      const c = PAL[(b >> (k * 2)) & 3], o = (i * 4 + k) * 4;
+      img.data[o] = c[0]; img.data[o+1] = c[1]; img.data[o+2] = c[2]; img.data[o+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function handle(type, p){
+  if (type === 0x12 && p.length === FRAME_BYTES) drawFrame(p);
+  else if (type === 0x11) setStatus(new TextDecoder().decode(p));
+  else if (type === 0x10) showRoms(new TextDecoder().decode(p));
+}
+
+function showRoms(text){
+  const box = $('roms'); box.innerHTML = '';
+  const lines = text.split('\n').filter(Boolean);
+  if (!lines.length) { box.innerHTML = '<div style="cursor:default;opacity:.6">No ROMs found on the SD card</div>'; return; }
+  for (const l of lines){
+    const [idx, name, kind] = l.split('|');
+    const d = document.createElement('div');
+    d.textContent = name + '  (' + kind + ')';
+    d.onclick = () => send(C.LOAD, +idx);
+    box.appendChild(d);
+  }
+}
+
+async function readLoop(){
+  let buf = new Uint8Array(0);
+  while (connected){
+    let r;
+    try { r = await reader.read(); } catch(e){ break; }
+    if (r.done) break;
+    const nb = new Uint8Array(buf.length + r.value.length);
+    nb.set(buf); nb.set(r.value, buf.length); buf = nb;
+    for (;;){
+      let s = -1;
+      for (let i = 0; i + 1 < buf.length; i++) if (buf[i] === SYNC0 && buf[i+1] === SYNC1){ s = i; break; }
+      if (s < 0){ buf = buf.slice(Math.max(0, buf.length - 1)); break; }
+      if (s > 0) buf = buf.slice(s);
+      if (buf.length < 5) break;
+      const type = buf[2], len = buf[3] | (buf[4] << 8);
+      if (len > 8000 || (type < 0x10 || type > 0x12)){ buf = buf.slice(2); continue; }
+      if (buf.length < 5 + len) break;
+      handle(type, buf.slice(5, 5 + len));
+      buf = buf.slice(5 + len);
+    }
+  }
+}
+
+async function connect(){
+  if (!('serial' in navigator)) { setStatus('Web Serial not supported - use Chrome or Edge'); return; }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    // avoid DTR/RTS toggling resetting the chip
+    try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch(e){}
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+    connected = true;
+    $('connect').textContent = 'Disconnect';
+    setStatus('Connected');
+    readLoop();
+    await send(C.HELLO); await send(C.VIDEO, $('video').checked ? 1 : 0); await send(C.LIST);
+  } catch(e){ setStatus('Connect failed: ' + e.message); }
+}
+
+async function disconnect(){
+  connected = false;
+  try { await reader.cancel(); } catch(e){}
+  try { reader.releaseLock(); writer.releaseLock(); await port.close(); } catch(e){}
+  writer = reader = port = null;
+  $('connect').textContent = 'Connect';
+  setStatus('Disconnected');
+}
+
+$('connect').onclick = () => connected ? disconnect() : connect();
+$('video').onchange = e => send(C.VIDEO, e.target.checked ? 1 : 0);
+$('menu').onclick = () => send(C.MENU);
+$('reset').onclick = () => send(C.RESET);
+$('ss').onclick = () => send(C.SAVESTATE);
+$('ls').onclick = () => send(C.LOADSTATE);
+$('refresh').onclick = () => send(C.LIST);
+
+document.querySelectorAll('button[data-k]').forEach(b => {
+  const bit = +b.dataset.k;
+  b.addEventListener('pointerdown', e => { b.setPointerCapture(e.pointerId); b.classList.add('on'); setJoy(bit, true); });
+  const up = () => { b.classList.remove('on'); setJoy(bit, false); };
+  b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
+});
+
+const KEYS = { ArrowUp:64, ArrowDown:128, ArrowLeft:32, ArrowRight:16, KeyZ:1, KeyX:2, Enter:8, Backspace:4 };
+addEventListener('keydown', e => {
+  if (e.code === 'Escape'){ send(C.MENU); e.preventDefault(); return; }
+  if (e.code in KEYS){ setJoy(KEYS[e.code], true); e.preventDefault(); }
+});
+addEventListener('keyup', e => { if (e.code in KEYS){ setJoy(KEYS[e.code], false); e.preventDefault(); } });
+addEventListener('blur', () => { joy = 0; send(C.JOY, 0); });
+</script>
+</body>
+</html>

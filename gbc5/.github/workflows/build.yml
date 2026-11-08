@@ -1,0 +1,43 @@
+name: Build ESP32-C5 firmware
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Peanut-GB core
+        run: |
+          git clone --depth 1 https://github.com/deltabeard/Peanut-GB.git /tmp/peanut
+          cp /tmp/peanut/peanut_gb.h main/peanut_gb.h
+          git -C /tmp/peanut log -1 --format='Peanut-GB commit %H' | tee peanut_version.txt
+
+      - name: Build (target esp32c5)
+        shell: bash
+        run: |
+          git config --global --add safe.directory '*'
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32c5
+          idf.py build
+          idf.py merge-bin -o build/gbemu-merged.bin
+          ls -l build/*.bin build/bootloader/bootloader.bin build/partition_table/partition-table.bin
+
+      - name: Collect output
+        run: |
+          mkdir -p out
+          cp build/gbemu_c5.bin out/gbemu-app.bin
+          cp build/gbemu-merged.bin out/gbemu-merged.bin
+          cp build/bootloader/bootloader.bin out/bootloader.bin
+          cp build/partition_table/partition-table.bin out/partition-table.bin
+          cp web/index.html out/controller.html
+          cp peanut_version.txt out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gbemu-esp32c5
+          path: out/
