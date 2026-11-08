@@ -18,7 +18,13 @@
 #define LCD_HOST_ID    SPI2_HOST
 #define LCD_W          320
 #define LCD_H          240
-#define LCD_PCLK_HZ    (40 * 1000 * 1000)
+/* 80 MHz is needed for a scaled picture (128 KB/frame). If the screen shows noise, try 40 MHz (then expect ~39 fps) */
+#define LCD_PCLK_HZ    (80 * 1000 * 1000)
+
+/* Size of the game picture on screen. 267x240 = full height, correct aspect ratio.
+ * If it is too slow, use 240x216 (1.5x). Max is 320x240. */
+#define GAME_OUT_W     267
+#define GAME_OUT_H     240
 
 /*
  * Panel orientation / colour. These are NOT verified on real hardware.
@@ -32,5 +38,5 @@
 #define LCD_INVERT     1
 #define LCD_BGR        0
 
-#define SHOW_FPS       1
+#define SHOW_FPS       0   /* the picture now covers the margins; fps is still logged on the UART console */
 #define STREAM_EVERY   2   /* send every Nth frame to the browser (2 => ~30 fps) */

@@ -42,8 +42,11 @@ static const char *TAG = "gbemu";
 
 #define GB_W 160
 #define GB_H 144
-#define GB_X0 ((LCD_W - GB_W) / 2)
-#define GB_Y0 ((LCD_H - GB_H) / 2)
+#define OUT_W GAME_OUT_W
+#define OUT_H GAME_OUT_H
+#define GB_X0 ((LCD_W - OUT_W) / 2)
+#define GB_Y0 ((LCD_H - OUT_H) / 2)
+#define SCALE_ROWS 24
 #define FRAME_US 16742   /* 59.73 Hz */
 
 /* ---------- colours (pre-swapped RGB565 for the SPI wire) ---------- */
@@ -119,6 +122,25 @@ static void draw_text(int x, int y, const char *s, uint16_t fg, uint16_t bg, int
     lcd_draw_wait(x, y, w, h, strip);
 }
 
+/* nearest-neighbour scaling of the 160x144 frame to OUT_W x OUT_H, in strips so little RAM is needed */
+static uint16_t *sbuf[2];
+static uint16_t xmap[OUT_W];
+
+static void draw_game(const uint16_t *src)
+{
+    int b = 0;
+    for (int y0 = 0; y0 < OUT_H; y0 += SCALE_ROWS) {
+        int rows = (OUT_H - y0 < SCALE_ROWS) ? (OUT_H - y0) : SCALE_ROWS;
+        uint16_t *d = sbuf[b];
+        for (int r = 0; r < rows; r++) {
+            const uint16_t *row = src + ((y0 + r) * GB_H / OUT_H) * GB_W;
+            for (int x = 0; x < OUT_W; x++) *d++ = row[xmap[x]];
+        }
+        lcd_draw_async(GB_X0, GB_Y0 + y0, OUT_W, rows, sbuf[b]);
+        b ^= 1;
+    }
+}
+
 static void display_init(void)
 {
     lcd_idle = xSemaphoreCreateBinary();
@@ -155,10 +177,13 @@ static void display_init(void)
     gpio_config(&bl);
     gpio_set_level(PIN_LCD_BL, 1);
 
+    fb[0] = heap_caps_malloc(GB_W * GB_H * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    configASSERT(fb[0]);
     for (int i = 0; i < 2; i++) {
-        fb[i] = heap_caps_malloc(GB_W * GB_H * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        configASSERT(fb[i]);
+        sbuf[i] = heap_caps_malloc(OUT_W * SCALE_ROWS * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        configASSERT(sbuf[i]);
     }
+    for (int x = 0; x < OUT_W; x++) xmap[x] = (uint16_t)(x * GB_W / OUT_W);
     strip = heap_caps_malloc(LCD_W * STRIP_ROWS * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
     configASSERT(strip);
 
@@ -500,7 +525,7 @@ static void play_loop(void)
 {
     int64_t next = esp_timer_get_time();
     int64_t last_save = next, fps_t = next;
-    int frames = 0, shown = 0, fb_i = 0;
+    int frames = 0, shown = 0;
     unsigned fcount = 0;
 
     while (in_play) {
@@ -523,14 +548,13 @@ static void play_loop(void)
         int64_t now = esp_timer_get_time();
         skip_render = (now > next + FRAME_US);   /* running late: drop this frame's drawing */
         want_stream = host_seen && stream_on && !skip_render && (fcount % STREAM_EVERY == 0);
-        cur_fb = fb[fb_i];
+        cur_fb = fb[0];
 
         gb_run_frame(&gb);
         fcount++;
 
         if (!skip_render) {
-            lcd_draw_async(GB_X0, GB_Y0, GB_W, GB_H, cur_fb);
-            fb_i ^= 1;
+            draw_game(cur_fb);
             shown++;
             if (want_stream) send_msg(M_VIDEO, pack_buf, sizeof pack_buf);
         }
