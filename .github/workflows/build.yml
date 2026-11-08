@@ -22,9 +22,9 @@ jobs:
         run: |
           git config --global --add safe.directory '*'
           . $IDF_PATH/export.sh
-          idf.py set-target esp32c5
-          idf.py build
-          idf.py merge-bin -o build/gbemu-merged.bin
+          idf.py --preview set-target esp32c5
+          idf.py --preview build
+          idf.py --preview merge-bin -o build/gbemu-merged.bin
           ls -l build/*.bin build/bootloader/bootloader.bin build/partition_table/partition-table.bin
 
       - name: Collect output
