@@ -24,8 +24,8 @@
 
 /* Size of the game picture on screen. 267x240 = full height, correct aspect ratio.
  * If it is too slow, use 240x216 (1.5x). Max is 320x240. */
-#define GAME_OUT_W     240   /* 1.5x, leaves 40 px left/right for touch buttons and 24 px at the bottom */
-#define GAME_OUT_H     216
+#define GAME_OUT_W     200   /* 1.25x, leaves 60 px left/right and 60 px at the bottom for big touch buttons */
+#define GAME_OUT_H     180
 
 /*
  * Panel orientation / colour. These are NOT verified on real hardware.

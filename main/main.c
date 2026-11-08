@@ -577,38 +577,64 @@ static void touch_init(void)
     }
 }
 
-/* ---------- touch layout while playing ----------
- *  x < 40            : d-pad (up / down / left / right)
- *  x >= 280          : A (top half) / B (bottom half)
- *  y >= 216 (bottom) : SELECT | START | MENU
+/* ---------- touch layout while playing (320x240) ----------
+ *  left column  x < 60      : d-pad. Up y<80, Down y>=160, middle band: Left (x<30) / Right
+ *  right column x >= 260    : A (top half) / B (bottom half), 60x120 each
+ *  bottom strip y >= 180    : SELECT | START | MENU, 60 px tall
  */
 #define TOUCH_MENU_FLAG 0x100
 static uint16_t touch_zone(int sx, int sy)
 {
-    if (sy >= OUT_H) {
-        if (sx < LCD_W / 3) return 0x04;
-        if (sx < 2 * LCD_W / 3) return 0x08;
-        return TOUCH_MENU_FLAG;
-    }
     if (sx < GB_X0) {
-        if (sy < 90) return 0x40;
-        if (sy > 126) return 0x80;
+        if (sy < 80) return 0x40;
+        if (sy >= 160) return 0x80;
         return sx < GB_X0 / 2 ? 0x20 : 0x10;
     }
-    if (sx >= GB_X0 + OUT_W) return sy < OUT_H / 2 ? 0x01 : 0x02;
+    if (sx >= GB_X0 + OUT_W) return sy < LCD_H / 2 ? 0x01 : 0x02;
+    if (sy >= OUT_H) {
+        int rel = sx - GB_X0;
+        if (rel < OUT_W / 3) return 0x04;
+        if (rel < 2 * OUT_W / 3) return 0x08;
+        return TOUCH_MENU_FLAG;
+    }
     return 0;
+}
+
+/* filled block with a 2 px gap around it so neighbouring buttons are visibly separate */
+static void blk(int x, int y, int w, int h, uint16_t col) { fill_rect(x + 2, y + 2, w - 4, h - 4, col); }
+
+/* dir: 0 up, 1 down, 2 left, 3 right */
+static void draw_arrow(int cx, int cy, int dir, uint16_t col)
+{
+    for (int i = 0; i < 10; i++) {
+        int w = 2 * i + 1;
+        switch (dir) {
+        case 0: fill_rect(cx - i, cy - 6 + i, w, 1, col); break;
+        case 1: fill_rect(cx - i, cy + 6 - i, w, 1, col); break;
+        case 2: fill_rect(cx - 6 + i, cy - i, 1, w, col); break;
+        default: fill_rect(cx + 6 - i, cy - i, 1, w, col); break;
+        }
+    }
 }
 
 static void draw_touch_hints(void)
 {
-    uint16_t pad = SW(C565(70, 80, 88)), ab = SW(C565(123, 42, 71));
-    fill_rect(11, 72, 18, 18, pad);  fill_rect(11, 126, 18, 18, pad);
-    fill_rect(0, 99, 18, 18, pad);   fill_rect(22, 99, 18, 18, pad);
-    fill_rect(284, 50, 32, 32, ab);  draw_text(294, 59, "A", COL_FG, ab, 2);
-    fill_rect(284, 130, 32, 32, ab); draw_text(294, 139, "B", COL_FG, ab, 2);
-    draw_text(30, 222, "SEL", COL_DIM, COL_BG, 2);
-    draw_text(130, 222, "START", COL_DIM, COL_BG, 2);
-    draw_text(250, 222, "MENU", COL_DIM, COL_BG, 2);
+    uint16_t pad = SW(C565(60, 72, 82)), ab = SW(C565(140, 40, 75)), strip = SW(C565(45, 55, 62));
+
+    /* d-pad column */
+    blk(0, 0, 60, 80, pad);   blk(0, 160, 60, 80, pad);
+    blk(0, 80, 30, 80, pad);  blk(30, 80, 30, 80, pad);
+    draw_arrow(30, 40, 0, COL_FG);  draw_arrow(30, 200, 1, COL_FG);
+    draw_arrow(15, 120, 2, COL_FG); draw_arrow(45, 120, 3, COL_FG);
+
+    /* A / B column */
+    blk(260, 0, 60, 120, ab);   draw_text(280, 46, "A", COL_FG, ab, 4);
+    blk(260, 120, 60, 120, ab); draw_text(280, 166, "B", COL_FG, ab, 4);
+
+    /* bottom strip */
+    blk(60, 180, 66, 60, strip);  draw_text(75, 203, "SEL", COL_FG, strip, 2);
+    blk(126, 180, 67, 60, strip); draw_text(129, 203, "START", COL_FG, strip, 2);
+    blk(193, 180, 67, 60, strip); draw_text(202, 203, "MENU", COL_FG, strip, 2);
 }
 
 /* ---------- menu ---------- */
